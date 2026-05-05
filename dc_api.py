@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import itertools
 import aiohttp
 import filetype
+from urllib.parse import urljoin
 
 DOCS_PER_PAGE = 200
 
@@ -32,6 +33,29 @@ POST_HEADERS = {
     "Upgrade-Insecure-Requests": "1",
     "User-Agent": "Mozilla/5.0 (Linux; Android 7.0; SM-G892A Build/NRD90M; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/67.0.3396.87 Mobile Safari/537.36",
     }
+
+PC_GET_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "Pragma": "no-cache",
+    "Upgrade-Insecure-Requests": "1",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    }
+
+PC_AJAX_HEADERS = {
+    "Accept": "*/*",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Connection": "keep-alive",
+    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    "Origin": "https://gall.dcinside.com",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "X-Requested-With": "XMLHttpRequest",
+    }
+
+PC_SERVICE_CODE_ALPHABET = "yL/M=zNa0bcPQdReSfTgUhViWjXkYIZmnpo+qArOBslCt2D3uE4Fv5G6wH178xJ9K"
+PC_WRITE_MIN_WAIT_SECONDS = 3.0
 
 GALLERY_POSTS_COOKIES = {
     "__gat_mobile_search": 1,
@@ -228,16 +252,31 @@ class API:
             return None
         doc_head_container = doc_head_containers[0]
         if len(doc_content_container):
-            title = " ".join(doc_head_container[0].text.strip().split())
-            author = doc_head_container[1][0][0].text.strip()
-            author_id = None if len(doc_head_container[1]) <= 1 else doc_head_container[1][1][0].get("href").split("/")[-1]
-            time = doc_head_container[1][0][1].text.strip()
+            title = " ".join(doc_head_container[0].text_content().strip().split())
+            ginfo = doc_head_container.xpath(".//ul[contains(@class, 'ginfo2')]/li")
+            author = " ".join(ginfo[0].text_content().strip().split()).replace(" (", "(")
+            gallog_links = doc_head_container.xpath(".//a[contains(@href, '/gallog/')]/@href")
+            author_id = gallog_links[0].rstrip("/").split("/")[-1] if gallog_links else None
+            time = ginfo[1].text_content().strip()
             doc_content = parsed.xpath("//div[@class='thum-txtin']")[0]
             for adv in doc_content.xpath("div[@class='adv-groupin']"):
                 adv.getparent().remove(adv)
             for adv in doc_content.xpath("//img"):
                 if adv.get("src", "").startswith("https://nstatic") and not adv.get("data-original"):
                     adv.getparent().remove(adv)
+            stats = parsed.xpath("//ul[contains(@class, 'ginfo2')]")
+            view_count = 0
+            if len(stats) > 1:
+                view_count_match = re.search(r"조회수\s*([0-9,]+)", stats[1].text_content())
+                if view_count_match:
+                    view_count = int(view_count_match.group(1).replace(",", ""))
+            def parse_count(xpath):
+                nodes = parsed.xpath(xpath)
+                if not nodes:
+                    # Some minor-gallery settings hide counters such as nonrecomm_btn.
+                    return 0
+                text = nodes[0].text_content().strip().replace(",", "")
+                return int(text) if text.isdigit() else 0
             return Document(
                     id = document_id,
                     board_id = board_id,
@@ -246,18 +285,18 @@ class API:
                     author_id =author_id,
                     contents= '\n'.join(i.strip() for i in doc_content.itertext() if i.strip() and not i.strip().startswith("이미지 광고")),
                     images= [Image(
-                        src=i.get("data-original", i.get("src")), 
-                        board_id=board_id, 
-                        document_id=document_id, 
+                        src=i.get("data-original", i.get("src")),
+                        board_id=board_id,
+                        document_id=document_id,
                         session=self.session)
-                        for i in doc_content.xpath("//img") 
+                        for i in doc_content.xpath("//img")
                             if i.get("data-original") or (not i.get("src","").startswith("https://nstatic") and
                                 not i.get("src", "").startswith("https://img.iacstatic.co.kr") and i.get("src"))],
                     html= lxml.html.tostring(doc_content, encoding=str),
-                    view_count= int(parsed.xpath("//ul[@class='ginfo2']")[1][0].text.strip().split()[1]),
-                    voteup_count= int(parsed.xpath("//span[@id='recomm_btn']")[0].text.strip()),
-                    votedown_count= int(parsed.xpath("//span[@id='nonrecomm_btn']")[0].text.strip()),
-                    logined_voteup_count= int(parsed.xpath("//span[@id='recomm_btn_member']")[0].text.strip()),
+                    view_count= view_count,
+                    voteup_count= parse_count("//span[@id='recomm_btn']"),
+                    votedown_count= parse_count("//span[@id='nonrecomm_btn']"),
+                    logined_voteup_count= parse_count("//span[@id='recomm_btn_member']"),
                     comments= lambda: self.comments(board_id, document_id),
                     time= self.__parse_time(time)
                     )
@@ -281,12 +320,15 @@ class API:
                 parsed = lxml.html.fromstring(await res.text())
             if not len(parsed[1].xpath("li")): break
             for li in parsed[1].xpath("li"):
-                if not len(li[0]) or not li[0].text: continue
+                if not len(li[0]) or not li[0].text_content().strip(): continue
+                author = " ".join(li[0].text_content().strip().split()).replace(" (", "(")
+                gallog_links = li[0].xpath(".//a[contains(@href, '/gallog/')]/@href")
+                author_id = gallog_links[0].rstrip("/").split("/")[-1] if gallog_links else None
                 yield Comment(
                     id= li.get("no"),
                     is_reply = "comment-add" in li.get("class", "").strip().split(),
-                    author = li[0].text + ("{}".format(li[0][0].text) if li[0][0].text else ""),
-                    author_id= li[0][1].get("data-info", None) if len(li[0]) > 1 else None,
+                    author = author,
+                    author_id= author_id,
                     contents= '\n'.join(i.strip() for i in li[1].itertext()),
                     dccon= li[1][0].get("data-original", li[1][0].get("src", None)) if len(li[1]) and li[1][0].tag=="img" else None,
                     voice= li[1][0].get("src", None) if len(li[1]) and li[1][0].tag=="iframe" else None,
@@ -440,6 +482,197 @@ class API:
         return True
     async def write_document(self, board_id, title="", contents="", name="", password="", is_minor=False):
         return await self.__write_or_modify_document(board_id, title, contents, name, password, is_minor=is_minor)
+
+    async def prepare_write_document_pc(self, board_id, title="", contents="", name="", password="", use_html=False):
+        return await self.__prepare_pc_write_document(board_id, title, contents, name, password, use_html)
+
+    async def write_document_pc(self, board_id, title="", contents="", name="", password="", use_html=False):
+        submit_url, payload = await self.__prepare_pc_write_document(board_id, title, contents, name, password, use_html)
+        headers = PC_AJAX_HEADERS.copy()
+        headers["Referer"] = "https://gall.dcinside.com/board/write/?id={}".format(board_id)
+        async with self.session.post(submit_url, headers=headers, data=payload) as res:
+            status = res.status
+            final_url = str(res.url)
+            text = await res.text()
+        return self.__parse_pc_write_response(board_id, status, final_url, text)
+
+    async def __prepare_pc_write_document(self, board_id, title="", contents="", name="", password="", use_html=False):
+        write_url = "https://gall.dcinside.com/board/write/?id={}".format(board_id)
+        async with self.session.get(write_url, headers=PC_GET_HEADERS) as res:
+            write_html = await res.text()
+        parsed = lxml.html.fromstring(write_html)
+        forms = parsed.xpath("//form[@id='write']")
+        if not forms:
+            snippet = " ".join(write_html.strip().split())[:500]
+            raise Exception("Error while preparing pc write document: write form not found response={!r}".format(snippet))
+
+        form = forms[0]
+        payload = self.__serialize_pc_write_form(form)
+        self.__set_pc_payload_value(payload, "id", board_id)
+        self.__set_pc_payload_value(payload, "subject", title)
+        self.__set_pc_payload_value(payload, "password", password)
+        if use_html:
+            self.__set_pc_payload_value(payload, "use_html", "Y")
+        if name:
+            self.__set_pc_payload_value(payload, "use_gall_nick", "N")
+            self.__set_pc_payload_value(payload, "name", name)
+        else:
+            self.__set_pc_payload_value(payload, "use_gall_nick", "Y")
+            self.__set_pc_payload_value(payload, "name", "")
+
+        service_code = self.__pc_payload_value(payload, "service_code") or self.__pc_cookie("service_code")
+        if service_code:
+            self.__set_pc_payload_value(payload, "service_code", service_code)
+
+        old_block_key = self.__pc_payload_value(payload, "block_key")
+        await asyncio.sleep(PC_WRITE_MIN_WAIT_SECONDS)
+        refreshed_block_key = await self.__pc_refresh_block_key(write_url, old_block_key)
+        self.__set_pc_payload_value(
+            payload,
+            "service_code",
+            self.__pc_apply_service_code_event_token(write_html, self.__pc_payload_value(payload, "service_code")),
+        )
+
+        payload.extend([
+                ("ci_t", self.__pc_cookie("ci_c")),
+                ("mode", "W"),
+                ("movieIdx", ""),
+                ("series_title", "[]"),
+                ("series_data", ""),
+                ("headTail", "\"\""),
+                ("block_key", refreshed_block_key),
+                ("memo", contents),
+                ("code", self.__pc_payload_value(payload, "code")),
+                ("bgm", "0"),
+            ])
+
+        submit_url = urljoin(write_url, form.get("action") or "/board/forms/article_submit")
+        payload = [(key, "" if value is None else str(value)) for key, value in payload]
+        return submit_url, payload
+
+    def __serialize_pc_write_form(self, form):
+        payload = []
+        for el in form.xpath(".//input[@name] | .//textarea[@name] | .//select[@name]"):
+            name_attr = el.get("name")
+            if not name_attr or el.get("disabled") is not None:
+                continue
+            input_type = (el.get("type") or "").lower()
+            if input_type in ("button", "submit", "reset", "image", "file"):
+                continue
+            if input_type in ("checkbox", "radio") and el.get("checked") is None:
+                continue
+            if el.tag == "textarea":
+                value = el.text or ""
+            elif el.tag == "select":
+                selected = el.xpath(".//option[@selected]")
+                options = el.xpath(".//option")
+                option = selected[0] if selected else (options[0] if options else None)
+                value = option.get("value") if option is not None else ""
+            else:
+                value = el.get("value", "")
+            payload.append((name_attr, "" if value is None else value))
+        return payload
+
+    def __pc_payload_value(self, payload, name):
+        if isinstance(payload, dict):
+            return payload.get(name, "")
+        for key, value in payload:
+            if key == name:
+                return value
+        return ""
+
+    def __set_pc_payload_value(self, payload, name, value):
+        for index, (key, _) in enumerate(payload):
+            if key == name:
+                payload[index] = (name, value)
+                return
+        payload.append((name, value))
+
+    def __pc_cookie(self, name):
+        cookies = self.session.cookie_jar.filter_cookies("https://gall.dcinside.com")
+        cookie = cookies.get(name)
+        return cookie.value if cookie else ""
+
+    def __pc_apply_service_code_event_token(self, html, service_code):
+        token_match = re.search(r"var\s+_r\s*=\s*_d\('([^']+)'\)", html)
+        if not token_match or not service_code:
+            return service_code
+        decoded_token = self.__pc_decode_service_code_token(token_match.group(1))
+        if not decoded_token:
+            return service_code
+
+        first_digit = int(decoded_token[0])
+        first_digit = first_digit - 5 if first_digit > 5 else first_digit + 4
+        decoded_token = str(first_digit) + decoded_token[1:]
+        parts = decoded_token.split(",")
+        replacement = ""
+        for index, part in enumerate(parts):
+            replacement += chr(int(2 * (float(part) - index - 1) / (13 - index - 1)))
+        return service_code[:-10] + replacement
+
+    def __pc_decode_service_code_token(self, token):
+        token = re.sub(r"[^A-Za-z0-9+/=]", "", token)
+        decoded = []
+        index = 0
+        while index < len(token):
+            first = PC_SERVICE_CODE_ALPHABET.find(token[index])
+            second = PC_SERVICE_CODE_ALPHABET.find(token[index + 1])
+            third = PC_SERVICE_CODE_ALPHABET.find(token[index + 2])
+            fourth = PC_SERVICE_CODE_ALPHABET.find(token[index + 3])
+            index += 4
+            if min(first, second, third, fourth) < 0:
+                return ""
+            decoded.append(chr((first << 2) | (second >> 4)))
+            if third != 64:
+                decoded.append(chr(((15 & second) << 4) | (third >> 2)))
+            if fourth != 64:
+                decoded.append(chr(((3 & third) << 6) | fourth))
+        return "".join(decoded)
+
+    async def __pc_refresh_block_key(self, referer, block_key):
+        if not block_key:
+            raise Exception("Error while preparing pc write document: block_key not found")
+        csrf_token = self.__pc_cookie("ci_c")
+        if not csrf_token:
+            raise Exception("Error while preparing pc write document: ci_c cookie not found")
+        headers = PC_AJAX_HEADERS.copy()
+        headers["Referer"] = referer
+        payload = {
+                "ci_t": csrf_token,
+                "block_key": block_key,
+            }
+        async with self.session.post("https://gall.dcinside.com/block/block/", headers=headers, data=payload) as res:
+            text = (await res.text()).strip()
+        if not text:
+            raise Exception("Error while preparing pc write document: refreshed block_key is empty")
+        return text
+
+    def __parse_pc_write_response(self, board_id, status, final_url, text):
+        parts = text.split("||")
+        if parts and parts[0].strip() == "true":
+            if len(parts) > 1 and parts[1].strip():
+                return parts[1].strip()
+            raise Exception(
+                "Error while parsing pc write document: success response had no document id status={} url={} response={!r}".format(
+                    status, final_url, " ".join(text.strip().split())[:500]
+                )
+            )
+        if parts and parts[0].strip() == "false":
+            reason = parts[1].strip() if len(parts) > 1 else ""
+            raise Exception(
+                "Error while write pc document: status={} url={} reason={!r} response={!r}".format(
+                    status, final_url, reason, " ".join(text.strip().split())[:500]
+                )
+            )
+        document_id_match = re.search(r"[?&]no=([0-9]+)", text)
+        if document_id_match:
+            return document_id_match.group(1)
+        raise Exception(
+            "Error while write pc document: status={} url={} response={!r}".format(
+                status, final_url, " ".join(text.strip().split())[:500]
+            )
+        )
+
     async def __write_or_modify_document(self, board_id, title="", contents="", name="", password="", intermediate=None, intermediate_referer=None, document_id=None, is_minor=False):
         if not intermediate:
             url = "https://m.dcinside.com/write/{}".format(board_id)
@@ -451,7 +684,8 @@ class API:
         first_url = url
         rand_code = parsed.xpath("//input[@name='code']")
         rand_code = rand_code[0].get("value") if len(rand_code) else None
-        user_id = parsed.xpath("//input[@name='user_id']")[0].get("value") if not name else None
+        user_id_nodes = parsed.xpath("//input[@name='user_id']")
+        user_id = user_id_nodes[0].get("value") if not name and user_id_nodes else None
         mobile_key = parsed.xpath("//input[@id='mobile_key']")[0].get("value")
         hide_robot = parsed.xpath("//input[@class='hide-robot']")[0].get("name")
         csrf_token = parsed.xpath("//meta[@name='csrf-token']")[0].get("content")
@@ -477,31 +711,39 @@ class API:
         header = POST_HEADERS.copy()
         url = "https://mupload.dcinside.com/write_new.php"
         header["Host"] = "mupload.dcinside.com"
+        header["Origin"] = "https://m.dcinside.com"
         header["Referer"] = first_url
-        payload = {
+        payload = {}
+        for input_el in parsed.xpath("//form[@id='writeForm']//input[@name]"):
+            name_attr = input_el.get("name")
+            if not name_attr or input_el.get("disabled") is not None:
+                continue
+            if input_el.get("type") in ("checkbox", "radio") and input_el.get("checked") is None:
+                continue
+            payload[name_attr] = input_el.get("value", "")
+        for textarea in parsed.xpath("//form[@id='writeForm']//textarea[@name]"):
+            name_attr = textarea.get("name")
+            if name_attr and textarea.get("disabled") is None:
+                payload[name_attr] = textarea.text or ""
+        payload.update({
                 "subject": title,
                 "memo": contents,
                 hide_robot: "1",
                 "GEY3JWF": hide_robot,
                 "id": board_id,
-                "contentOrder": "order_memo",
                 "mode": "write",
                 "Block_key": con_key,
-                "bgm":"",
-                "iData":"",
-                "yData":"",
-                "tmp":"",
-                "imgSize": "850",
                 "is_minor": "1" if is_minor else "",
-                "mobile_key": mobile_key,
                 "GEY3JWF": hide_robot,
-            }
+            })
         if rand_code:
             payload["code"] = rand_code
         if name:
             payload["name"] = name
+            payload["use_gall_nickname"] = "0"
+        if password:
             payload["password"] = password
-        else:
+        if user_id:
             payload["user_id"] = user_id
         if intermediate:
             payload["mode"] = "modify"
@@ -510,11 +752,39 @@ class API:
             payload["no"] = document_id
         cookies = {
             "m_dcinside_" + board_id: board_id,
-            "m_dcinside_lately": quote(board_id + "|" + board_name + ","),
-            "_ga": "GA1.2.693521455.1588839880",
+                "m_dcinside_lately": quote(board_id + "|" + board_name + ","),
+                "_ga": "GA1.2.693521455.1588839880",
             }
-        async with self.session.post(url, headers=header, data=payload, cookies=cookies) as res:
-            res = await res.text()
+        form = aiohttp.FormData()
+        form._is_multipart = True
+        for key, value in payload.items():
+            form.add_field(key, "" if value is None else str(value))
+        async with self.session.post(url, headers=header, data=form, cookies=cookies) as res:
+            status = res.status
+            final_url = str(res.url)
+            text = await res.text()
+        return self.__parse_write_response(board_id, status, final_url, text)
+
+    def __parse_write_response(self, board_id, status, final_url, text):
+        document_id_match = re.search(r"/board/{}/([0-9]+)".format(re.escape(board_id)), final_url)
+        if document_id_match:
+            return document_id_match.group(1)
+        document_id_match = re.search(r"/board/{}/([0-9]+)".format(re.escape(board_id)), text)
+        if document_id_match:
+            return document_id_match.group(1)
+        document_id_match = re.search(r"[?&]no=([0-9]+)", text)
+        if document_id_match:
+            return document_id_match.group(1)
+        alert_match = re.search(r"alert\\(['\\\"](.+?)['\\\"]\\)", text)
+        alert = unquote(alert_match.group(1)) if alert_match else None
+        snippet = " ".join(text.strip().split())[:500]
+        if alert:
+            snippet = "{} | {}".format(alert, snippet)
+        raise Exception(
+            "Error while write document: status={} url={} response={!r}".format(
+                status, final_url, snippet
+            )
+        )
 
     async def __access(self, token_verify, target_url, require_conkey=True, csrf_token=None):
         if require_conkey:
@@ -697,4 +967,3 @@ if version.major >= 3 and version.minor >= 8:
 
 if __name__ == "__main__":
     unittest.main()
-
