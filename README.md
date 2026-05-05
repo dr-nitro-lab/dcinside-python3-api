@@ -1,6 +1,28 @@
 # dcinside-python3-api
 Deadly simple non official async dcinside api for python3
 
+## NitroLab fork status
+
+This fork is maintained for `dc_gallbot` restore/debugging work because the
+original upstream project appears inactive.
+
+Current maintained repository:
+
+```
+https://github.com/dr-nitro-lab/dcinside-python3-api
+```
+
+Important fork changes:
+
+- Current mobile read parser fixes for boards, documents, comments, gallery-log
+  author links, and optional minor-gallery counters.
+- Write diagnostics for the legacy mobile write path.
+- `API.write_document_pc(...)`, which follows the current PC web write flow:
+  `GET /board/write`, `/block/block/`, then `/board/forms/article_submit`.
+- Browser-like PC submit handling: `service_code` event-token transform,
+  duplicate `block_key`/`memo` field ordering, and a short page dwell wait before
+  submit.
+
 ```python
 # 프로그래밍 갤러리 글 무한 크롤링
 import asyncio
@@ -33,6 +55,10 @@ async def run():
   # 글 작성
   doc_id = await api.write_document(board_id="programming", title="java vs python", contents="닥치고 자바", name="ㅇㅇ", password="1234")
 
+  # PC 웹 경로로 글 작성
+  # 현재 dcinside 글쓰기에서는 이 경로가 모바일 write_new.php보다 안정적일 수 있다.
+  doc_id = await api.write_document_pc(board_id="programming", title="java vs python", contents="닥치고 자바", name="ㅇㅇ", password="1234", use_html=False)
+
   # 글 삭제
   await api.remove_document(board_id="programming", doc_id=doc_id, password="1234")
 
@@ -59,13 +85,16 @@ python(>3.6) aiohttp, lxml
 - [ ] Upvote/Downvote
 
 # Usage
-Place dc_api.py in your working directory
-
-or install via pip
+Install this maintained fork directly from GitHub:
 
 ```
-pip3 install --user dc_api
+pip install git+https://github.com/dr-nitro-lab/dcinside-python3-api.git@master
 ```
+
+Or place `dc_api.py` in your working directory.
+
+The PyPI package is not maintained with the current restore fixes, so avoid it
+for restored bot operation.
 
 ```python
 import dc_api
