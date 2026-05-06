@@ -496,6 +496,19 @@ class API:
             text = await res.text()
         return self.__parse_pc_write_response(board_id, status, final_url, text)
 
+    async def prepare_modify_document_pc(self, board_id, document_id, title="", contents="", password=""):
+        return await self.__prepare_pc_modify_document(board_id, document_id, title, contents, password)
+
+    async def modify_document_pc(self, board_id, document_id, title="", contents="", password=""):
+        submit_url, payload = await self.__prepare_pc_modify_document(board_id, document_id, title, contents, password)
+        headers = PC_AJAX_HEADERS.copy()
+        headers["Referer"] = "https://gall.dcinside.com/board/modify/?id={}&no={}".format(board_id, document_id)
+        async with self.session.post(submit_url, headers=headers, data=payload) as res:
+            status = res.status
+            final_url = str(res.url)
+            text = await res.text()
+        return self.__parse_pc_modify_response(board_id, document_id, status, final_url, text)
+
     async def __prepare_pc_write_document(self, board_id, title="", contents="", name="", password="", use_html=False):
         write_url = "https://gall.dcinside.com/board/write/?id={}".format(board_id)
         async with self.session.get(write_url, headers=PC_GET_HEADERS) as res:
@@ -550,6 +563,105 @@ class API:
         payload = [(key, "" if value is None else str(value)) for key, value in payload]
         return submit_url, payload
 
+    async def __prepare_pc_modify_document(self, board_id, document_id, title="", contents="", password=""):
+        if not password:
+            raise Exception("Error while preparing pc modify document: password is required")
+        modify_url = "https://gall.dcinside.com/board/modify/?id={}&no={}".format(board_id, document_id)
+        async with self.session.get(modify_url, headers=PC_GET_HEADERS) as res:
+            modify_html = await res.text()
+        parsed = lxml.html.fromstring(modify_html)
+
+        forms = parsed.xpath("//form[@id='modify']")
+        if not forms:
+            password_form = parsed.xpath("//form[@id='password_confirm']")
+            if not password_form:
+                snippet = " ".join(modify_html.strip().split())[:500]
+                raise Exception("Error while preparing pc modify document: password form not found response={!r}".format(snippet))
+            password_form = password_form[0]
+            ci_t = self.__form_value(password_form, "ci_t") or self.__pc_cookie("ci_c")
+            auth_token = self.__form_value(password_form, "auth_token")
+            gallery_type = self.__pc_gallery_type(modify_html)
+            password_headers = PC_AJAX_HEADERS.copy()
+            password_headers["Referer"] = modify_url
+            password_payload = {
+                "id": board_id,
+                "no": str(document_id),
+                "_GALLTYPE_": gallery_type,
+                "password": password,
+                "g-recaptcha-response": "",
+                "auth_token": auth_token,
+                "ci_t": ci_t,
+            }
+            async with self.session.post(
+                    "https://gall.dcinside.com/board/forms/modify_password_submit",
+                    headers=password_headers,
+                    data=password_payload) as res:
+                password_text = (await res.text()).strip()
+            password_parts = password_text.split("||")
+            if not password_parts or password_parts[0].strip() != "true" or len(password_parts) < 2:
+                raise Exception(
+                    "Error while preparing pc modify document: password check failed response={!r}".format(
+                        " ".join(password_text.split())[:500]
+                    )
+                )
+            form_headers = PC_GET_HEADERS.copy()
+            form_headers["Referer"] = modify_url
+            form_payload = {
+                "ci_t": ci_t,
+                "id": board_id,
+                "no": str(document_id),
+                "key": password_parts[1].strip(),
+            }
+            async with self.session.post(modify_url, headers=form_headers, data=form_payload) as res:
+                modify_html = await res.text()
+            parsed = lxml.html.fromstring(modify_html)
+            forms = parsed.xpath("//form[@id='modify']")
+
+        if not forms:
+            snippet = " ".join(modify_html.strip().split())[:500]
+            raise Exception("Error while preparing pc modify document: modify form not found response={!r}".format(snippet))
+
+        form = forms[0]
+        current_contents = self.__pc_modify_contents(modify_html)
+        payload = {
+            "ci_t": self.__pc_cookie("ci_c"),
+            "file": [],
+            "file_write": [],
+            "file_delete": [],
+            "subject": title,
+            "memo": contents,
+            "id": self.__form_value(form, "id") or board_id,
+            "r_key": self.__form_value(form, "r_key"),
+            "key": self.__form_value(form, "key"),
+            "no": self.__form_value(form, "no") or str(document_id),
+            "bigdccon_key": self.__form_value(form, "bigdccon_key"),
+            "upload_status": self.__form_value(form, "upload_status"),
+            "headtext": self.__form_value(form, "headtext"),
+            "bgm": self.__form_value(form, "bgm"),
+            "g-recaptcha-response": "",
+            "_GALLTYPE_": self.__form_value(form, "_GALLTYPE_") or self.__pc_gallery_type(modify_html),
+            "poll": self.__form_value(form, "poll"),
+            "origin_poll": self.__form_value(form, "origin_poll"),
+            "s_pass": "",
+            "auto_del_time": "",
+            "fix": self.__form_value(form, "fix"),
+            "noti_gall_ids": self.__form_value(form, "noti_gall_ids"),
+            "canonical": self.__form_value(form, "canonical"),
+            "secret": "",
+            "movieIdx": "",
+            "movie_exist_idx": "",
+            "series_title": "[]",
+            "series_data": "",
+            "headTail": "\"\"",
+            "my_auto_zzal_img": self.__form_value(form, "my_auto_zzal_img"),
+        }
+        if title == "":
+            payload["subject"] = self.__form_value(form, "subject")
+        if contents == "":
+            payload["memo"] = current_contents
+        submit_url = urljoin(modify_url, form.get("action") or "/board/forms/modify_submit")
+        return submit_url, payload
+
     def __serialize_pc_write_form(self, form):
         payload = []
         for el in form.xpath(".//input[@name] | .//textarea[@name] | .//select[@name]"):
@@ -572,6 +684,28 @@ class API:
                 value = el.get("value", "")
             payload.append((name_attr, "" if value is None else value))
         return payload
+
+    def __form_value(self, form, name):
+        nodes = form.xpath(".//*[@name=$name]", name=name)
+        if not nodes:
+            return ""
+        node = nodes[0]
+        if node.tag == "textarea":
+            return node.text or ""
+        return node.get("value", "") or ""
+
+    def __pc_gallery_type(self, html):
+        match = re.search(r"var\s+_GALLERY_TYPE_\s*=\s*\"([^\"]+)\"", html)
+        return match.group(1) if match else "G"
+
+    def __pc_modify_contents(self, html):
+        match = re.search(r"let\s+modify_memo\s*=\s*\"((?:\\.|[^\"\\])*)\";", html)
+        if not match:
+            return ""
+        try:
+            return json.loads("\"{}\"".format(match.group(1)))
+        except Exception:
+            return match.group(1)
 
     def __pc_payload_value(self, payload, name):
         if isinstance(payload, dict):
@@ -669,6 +803,28 @@ class API:
             return document_id_match.group(1)
         raise Exception(
             "Error while write pc document: status={} url={} response={!r}".format(
+                status, final_url, " ".join(text.strip().split())[:500]
+            )
+        )
+
+    def __parse_pc_modify_response(self, board_id, document_id, status, final_url, text):
+        parts = text.split("||")
+        if parts and parts[0].strip() == "true":
+            if len(parts) > 1 and parts[1].strip():
+                return parts[1].strip()
+            return str(document_id)
+        if parts and parts[0].strip() == "false":
+            reason = parts[1].strip() if len(parts) > 1 else ""
+            raise Exception(
+                "Error while modify pc document: status={} url={} reason={!r} response={!r}".format(
+                    status, final_url, reason, " ".join(text.strip().split())[:500]
+                )
+            )
+        document_id_match = re.search(r"[?&]no=([0-9]+)", text)
+        if document_id_match:
+            return document_id_match.group(1)
+        raise Exception(
+            "Error while modify pc document: status={} url={} response={!r}".format(
                 status, final_url, " ".join(text.strip().split())[:500]
             )
         )
