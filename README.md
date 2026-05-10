@@ -3,7 +3,7 @@ Deadly simple non official async dcinside api for python3
 
 ## NitroLab fork status
 
-This fork is maintained for `dc_gallbot` restore/debugging work because the
+This fork is maintained for GallKeeper restore/debugging work because the
 original upstream project appears inactive.
 
 Current maintained repository:
