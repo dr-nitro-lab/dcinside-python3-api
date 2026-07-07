@@ -781,6 +781,17 @@ class API:
             raise Exception("Error while preparing pc write document: refreshed block_key is empty")
         return text
 
+    def __alert_message(self, text):
+        alert_match = re.search(r"alert\((['\"])(.*?)\1\)", text, flags=re.S)
+        return unquote(alert_match.group(2)) if alert_match else None
+
+    def __response_snippet(self, text, limit=500):
+        alert = self.__alert_message(text)
+        snippet = " ".join(text.strip().split())[:limit]
+        if alert:
+            return "{} | {}".format(alert, snippet)
+        return snippet
+
     def __parse_pc_write_response(self, board_id, status, final_url, text):
         parts = text.split("||")
         if parts and parts[0].strip() == "true":
@@ -788,14 +799,14 @@ class API:
                 return parts[1].strip()
             raise Exception(
                 "Error while parsing pc write document: success response had no document id status={} url={} response={!r}".format(
-                    status, final_url, " ".join(text.strip().split())[:500]
+                    status, final_url, self.__response_snippet(text)
                 )
             )
         if parts and parts[0].strip() == "false":
             reason = parts[1].strip() if len(parts) > 1 else ""
             raise Exception(
                 "Error while write pc document: status={} url={} reason={!r} response={!r}".format(
-                    status, final_url, reason, " ".join(text.strip().split())[:500]
+                    status, final_url, reason, self.__response_snippet(text)
                 )
             )
         document_id_match = re.search(r"[?&]no=([0-9]+)", text)
@@ -803,7 +814,7 @@ class API:
             return document_id_match.group(1)
         raise Exception(
             "Error while write pc document: status={} url={} response={!r}".format(
-                status, final_url, " ".join(text.strip().split())[:500]
+                status, final_url, self.__response_snippet(text)
             )
         )
 
@@ -817,7 +828,7 @@ class API:
             reason = parts[1].strip() if len(parts) > 1 else ""
             raise Exception(
                 "Error while modify pc document: status={} url={} reason={!r} response={!r}".format(
-                    status, final_url, reason, " ".join(text.strip().split())[:500]
+                    status, final_url, reason, self.__response_snippet(text)
                 )
             )
         document_id_match = re.search(r"[?&]no=([0-9]+)", text)
@@ -825,7 +836,7 @@ class API:
             return document_id_match.group(1)
         raise Exception(
             "Error while modify pc document: status={} url={} response={!r}".format(
-                status, final_url, " ".join(text.strip().split())[:500]
+                status, final_url, self.__response_snippet(text)
             )
         )
 
@@ -931,11 +942,7 @@ class API:
         document_id_match = re.search(r"[?&]no=([0-9]+)", text)
         if document_id_match:
             return document_id_match.group(1)
-        alert_match = re.search(r"alert\\(['\\\"](.+?)['\\\"]\\)", text)
-        alert = unquote(alert_match.group(1)) if alert_match else None
-        snippet = " ".join(text.strip().split())[:500]
-        if alert:
-            snippet = "{} | {}".format(alert, snippet)
+        snippet = self.__response_snippet(text)
         raise Exception(
             "Error while write document: status={} url={} response={!r}".format(
                 status, final_url, snippet
